@@ -1,0 +1,160 @@
+{
+  "id": "1329-s2-mobile-web-v1",
+  "issueRef": "1329",
+  "title": "点引用定位应稳定跳到被引用消息",
+  "category": "bug-intermittent",
+  "surface": "mobile-web",
+  "issueSurfaces": [
+    "ios"
+  ],
+  "env": "prod",
+  "launch": "once",
+  "targets": [
+    {
+      "id": "conv",
+      "kind": "group-conversation",
+      "guidance": "the conversation titled \"黄悦龙Aaron, 黄悦龙-AgentEval, aaron+test2\" (titles may be cut short with …)"
+    },
+    {
+      "id": "link",
+      "kind": "quote-card",
+      "guidance": "会话底部最近的一条引用回复里的引用块（左侧竖线 + 原发送人 + 原文；引用的是普通文字，不是链接 / URL）",
+      "afterPrepare": true
+    }
+  ],
+  "setup": [
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.openConversation",
+        "input": {
+          "target": "conv"
+        }
+      },
+      "delayAfterMs": 1000
+    }
+  ],
+  "prepare": [
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.sendMessage",
+        "input": {
+          "text": "autotest-quote-source 1329"
+        }
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.quoteReply",
+        "input": {
+          "quote": "autotest-quote-source 1329",
+          "text": "autotest-quote-reply 1329"
+        }
+      },
+      "delayAfterMs": 1000
+    }
+  ],
+  "actions": [
+    {
+      "type": "tap",
+      "element": "target.link",
+      "delayAfterMs": 1000
+    },
+    {
+      "type": "wait",
+      "delayAfterMs": 1000,
+      "value": "1000"
+    }
+  ],
+  "checks": [
+    {
+      "kind": "baseline",
+      "expect": "点引用块后跳到被引用的原消息（每轮落在同一位置）",
+      "want": "present"
+    }
+  ],
+  "afterCheck": [
+    {
+      "type": "tap",
+      "delayAfterMs": 900,
+      "element": "chat.back"
+    },
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.openConversation",
+        "input": {
+          "target": "conv"
+        }
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "type": "wait",
+      "delayAfterMs": 1000,
+      "value": "1000"
+    }
+  ],
+  "limits": {
+    "maxSteps": 1000,
+    "maxMinutes": 15,
+    "maxIntervalMs": 1000
+  },
+  "verdictRule": {
+    "anyHit": true
+  },
+  "contract": {
+    "issueRef": "1329",
+    "sub": "s2",
+    "preconditions": [
+      {
+        "id": "logged-in",
+        "text": "已登录",
+        "establish": "executor"
+      },
+      {
+        "id": "group-conversation",
+        "text": "存在成员 ≥3 的群聊",
+        "establish": "existing-data"
+      },
+      {
+        "id": "quote-reply-exists",
+        "text": "会话里有一条引用回复（在允许清单会话中构造）",
+        "establish": "construct"
+      }
+    ],
+    "trigger": {
+      "semantics": "tap-quote",
+      "text": "on the latest version, tapping a message location link often jumps to a very old message instead of the target ",
+      "pattern": "quote-jump",
+      "params": {
+        "conversation": "黄悦龙Aaron, 黄悦龙-AgentEval, aaron+test2"
+      }
+    },
+    "observable": {
+      "observation": "quoted-original",
+      "text": "Likes should display immediately after tapping; message location should jump to the target message; the keyboard should auto-populate when the input box is focused.",
+      "phenomenon": "on the latest version, tapping a message location link often jumps to a very old message instead of the target "
+    },
+    "provenance": {
+      "by": "rules",
+      "skillVersion": "2026.10.26-1"
+    }
+  },
+  "provenance": {
+    "generatedBy": "rules",
+    "skillVersion": "2026.10.26-1",
+    "pattern": "quote-jump",
+    "confirmedAt": "2026-10-27T04:44:23.552Z",
+    "draftHash": "b2399250dd48d72f"
+  },
+  "coverage": "covered",
+  "substitution": {
+    "from": "ios",
+    "to": "mobile-web",
+    "reason": "ios 端当前无可用执行端（设备池只有 Android 真机，Web 用 Playwright）。替代为 android-app（同为原生移动端交互：长按/键盘/触控）或 mobile-web（同一 Web 代码的手机视口 + 触屏）；结论不能直接代表 ios 端。"
+  }
+}

@@ -1,0 +1,384 @@
+// Teamily SKILL Nodes (table: node-specs.ts). Nodes of phase "any" only perform coordinate operations
+// through a black-box Driver (element points from the SKILL cache — located outside the loop the first time
+// they are needed — and the targets frozen at preparation);
+// "prepare-only" Nodes may also locate (hierarchy / vision) and never run in the loop.
+import { z } from 'zod';
+import type { Driver, Point } from '../../drivers/types';
+import { RoundDrift, sleep } from '../../drivers/types';
+import { type Credentials, mobileLayout } from '../../platform/accounts/types';
+import { decodePng, pixelDiff, type Rgba } from '../../core/image';
+import { hasElement, pointFor, type Profile } from '../profile';
+import { NODE_SPECS } from './node-specs';
+
+export interface NodeContext {
+  driver: Driver;
+  profile: Profile;
+  /** Frozen dynamic targets: id → point. */
+  targets: Record<string, Point>;
+  /** Resolved by the executor from the account pool; never logged. */
+  credentials?: () => Credentials;
+  /** Max wait used by nodes that wait for a page (ms). */
+  settleMs?: number;
+  /** Tiered locate (prepare-only Nodes): literal texts first, then the description by vision. */
+  /** textOnly: ① literal text only — never a vision guess (where a wrong guess would tap something else). */
+  locate?: (description: string, texts: string[], newest?: boolean, textOnly?: boolean) => Promise<Point | null>;
+  /** Preparation only (hierarchy reads allowed): the composer's text, null = unknown. */
+  composerText?: () => Promise<string | null>;
+  /** A reference region ("page/region") shows in this screenshot — pixels only (no tree, no model), so loop-safe. */
+  regionShows?: (img: Rgba, key: string) => boolean;
+  /** A prepare-only Node froze a dynamic target (id → point); the executor records it with the run's targets. */
+  onFreeze?: (id: string, point: Point, chosen: string) => void;
+}
+
+type Exec<I> = (ctx: { input: I; context: NodeContext }) => Promise<{ summary?: string } | void>;
+
+// Node input schemas: our zod copy in node-specs.ts (@midscene/core validates against its own zod, so the
+// schemas are used for `autotest nodes` and plan validation instead of `inputSchema`).
+export const NODE_SCHEMAS = Object.fromEntries(NODE_SPECS.map((n) => [n.name, n.schema])) as Record<string, z.ZodObject<any>>;
+
+export type NodeName = string;
+
+const target = (c: NodeContext, id: string): Point => {
+  const p = c.targets[id];
+  if (!p) throw new Error(`target ${id} not frozen (preparation stage did not pick it)`);
+  return p;
+};
+
+const tapEl = async (c: NodeContext, id: string) => c.driver.tap(await pointFor(c.profile, id));
+const pointBox = async (c: NodeContext, id: string) => {
+  await pointFor(c.profile, id);
+  const e = c.profile.elements[id];
+  return e.box;
+};
+
+const login: Exec<{ account?: string }> = async ({ context: c }) => {
+  const cred = c.credentials?.();
+  if (!cred) throw new Error('teamily.login: no credentials provider');
+  // Phone browser: the on-screen keyboard covers the form buttons — submit with its Enter ("Go") key.
+  const submit = (id: string) => (c.driver.surface === 'android-web' ? c.driver.key('enter') : tapEl(c, id));
+  await tapEl(c, 'login.email');
+  await c.driver.type(cred.email);
+  await submit('login.emailContinue');
+  await sleep(Math.max(c.settleMs ?? 0, 3500));
+  await tapEl(c, 'login.password');
+  await c.driver.type(cred.password);
+  await submit('login.continue');
+  return { summary: `login ${cred.email.replace(/^(.).*@/, '$1***@')}` };
+};
+
+const openConversation: Exec<{ target: string }> = async ({ input, context: c }) => {
+  await c.driver.tap(target(c, input.target));
+  return { summary: `open ${input.target}` };
+};
+
+const sendMessage: Exec<{ text: string; kind?: 'plain' | 'markdown-link' }> = async ({ input: raw, context: c }) => {
+  // markdown-link: the text goes out in Markdown link syntax [text](text) (precondition of the 2044 family).
+  const input = raw.kind === 'markdown-link' ? { ...raw, text: `[${raw.text}](${raw.text})` } : raw;
+  // Screen checks (no hierarchy reads): the keyboard really came up before Back hides it, and the composer
+  // box looks empty again after sending — otherwise send once more with the send button.
+  const box = await pointBox(c, 'chat.composer');
+  const shot = async () => decodePng(await c.driver.screenshot());
+  const empty = await shot();
+  await tapEl(c, 'chat.composer');
+  await sleep(500);
+  let focused = await shot();
+  // Phones: type only once the soft keyboard is up — text typed with nothing focused lands elsewhere
+  // (the phone browser puts it into its address bar). One retap, then give up (a drift, not a send).
+  if (mobileLayout(c.driver.surface) && c.driver.surface !== 'mobile-web') {
+    const up = async () => {
+      for (let i = 0; i < 6; i++) {
+        // System state when available (screen changes from new messages fooled the pixel test).
+        const kb = c.driver.keyboardShown ? await c.driver.keyboardShown() : null;
+        if (kb === true || (kb === null && pixelDiff(empty, focused) > 20_000)) return true;
+        await sleep(500);
+        focused = await shot();
+      }
+      return false;
+    };
+    if (!(await up())) {
+      await tapEl(c, 'chat.composer');
+      if (!(await up())) throw new Error('teamily.sendMessage: the composer did not take focus (keyboard not up) — not typing');
+    }
+  }
+  await c.driver.type(input.text);
+  if (c.driver.surface === 'android-app') {
+    // RN composer: Enter is a newline. Hide the keyboard (only if it is up: Back would otherwise leave the
+    // conversation), then tap the (located, keyboard-down) send button.
+    const kbUp = c.driver.keyboardShown ? await c.driver.keyboardShown() : null;
+    if (kbUp === true || (kbUp === null && pixelDiff(empty, focused) > 20_000)) {
+      await c.driver.back();
+      await sleep(400);
+    }
+    await tapEl(c, 'chat.send');
+    // Preparation: a send tap during the keyboard-hide animation can be lost — the text stays in the composer
+    // (and a later "newest message" locate would find nothing sent). Tap once more, then fail clearly.
+    if (c.composerText) {
+      for (let i = 0; i < 2; i++) {
+        await sleep(800);
+        const left = await c.composerText();
+        if (left === null || !left.includes(input.text.slice(0, 20))) break;
+        if (i) throw new Error('teamily.sendMessage: the text stayed in the composer (send did not go out)');
+        await tapEl(c, 'chat.send');
+      }
+    }
+  } else if (mobileLayout(c.driver.surface)) await tapEl(c, 'chat.send'); // touch keyboard: Enter is a newline (phone browser: send located with the keyboard up)
+  else await c.driver.key('Enter');
+  await sleep(800);
+  if (!mobileLayout(c.driver.surface)) {
+    // Desktop: text still in the composer (Enter swallowed while the conversation was still loading) → send button.
+    const after = await shot();
+    const dpr = after.width / c.profile.viewport.width;
+    // Baseline: the focused, still-empty composer (no placeholder difference).
+    const px = pixelDiff(focused, after, [box[0] * dpr, box[1] * dpr, box[2] * dpr, box[3] * dpr]);
+    if (px > 150 && (await hasElement(c.profile, 'chat.send'))) {
+      await tapEl(c, 'chat.send');
+      await sleep(800);
+      return { summary: `sent ${input.text.length} chars (Enter did not send; used the send button)` };
+    }
+  }
+  return { summary: `sent ${input.text.length} chars` };
+};
+
+/** prepare-only: quote-reply a message found by its text — long-press it, choose 引用/回复 in its menu,
+ *  type the reply, send. Locating (accessibility first, vision after) happens here, never in the loop. */
+const quoteReply: Exec<{ quote: string; text: string }> = async ({ input, context: c }) => {
+  if (!c.locate) throw new Error('teamily.quoteReply: no locator (prepare-only node)');
+  // The message just sent may still be rendering: look a few times.
+  let msg: Point | null = null;
+  for (let i = 0; i < 4 && !msg; i++) {
+    if (i) await sleep(1500);
+    msg = await c.locate(`the message bubble containing "${input.quote}" (the newest one)`, [input.quote], true);
+  }
+  if (!msg) throw new Error(`teamily.quoteReply: message "${input.quote}" not on screen`);
+  // The menu item must really be the message menu's: on the App it is read from the accessibility tree only
+  // (a vision guess once picked a composer-toolbar icon and opened the meeting-minutes sheet). The menu is
+  // polled a few times (slow to settle); one more long-press in place, never Back — on the App, Back with the
+  // menu up leaves the chat.
+  const textOnly = c.driver.surface === 'android-app';
+  let item: Point | null = null;
+  for (let i = 0; i < 2 && !item; i++) {
+    await c.driver.longPress(msg);
+    // A system float (HyperOS 「文本识别」) may take the long-press: close it and press again.
+    if (await c.driver.dismissSystemOverlay?.()) await c.driver.longPress(msg);
+    for (let j = 0; j < (textOnly ? 3 : 1) && !item; j++) {
+      await sleep(j ? 1000 : 1500);
+      item = await c.locate('the Quote / Reply item of the message action menu', ['引用', '回复', 'Quote', 'Reply'], false, textOnly);
+    }
+  }
+  if (!item) throw new Error('teamily.quoteReply: the message menu (引用 / 回复) did not open');
+  await c.driver.tap(item);
+  await sleep(1000);
+  await sendMessage({ input: { text: input.text }, context: c });
+  return { summary: `quote-replied to "${input.quote.slice(0, 30)}"` };
+};
+
+const typeMention: Exec<Record<string, never>> = async ({ context: c }) => {
+  await tapEl(c, 'chat.composer');
+  await c.driver.type('@');
+};
+
+/** Phones: the soft keyboard is up (system state; null = unknown). */
+const keyboardUp = async (c: NodeContext) => (c.driver.keyboardShown ? await c.driver.keyboardShown() : null);
+
+/** App: hide the soft keyboard if it is up (only then: Back with the keyboard down leaves the chat). */
+const hideKeyboard = async (c: NodeContext) => {
+  if ((await keyboardUp(c)) === true) {
+    await c.driver.back();
+    await sleep(400);
+  }
+};
+
+/** App: focus the composer (tap only while the keyboard is down — with it up the located point is on the
+ *  keyboard) and wait for the keyboard; not focused = the round's input cannot land (drift). */
+const focusComposer = async (c: NodeContext) => {
+  for (let i = 0; i < 2; i++) {
+    if ((await keyboardUp(c)) === true) return;
+    await tapEl(c, 'chat.composer');
+    for (let j = 0; j < 5; j++) {
+      await sleep(400);
+      if ((await keyboardUp(c)) !== false) return;
+    }
+  }
+  throw new RoundDrift('the composer did not take focus (keyboard not up)');
+};
+
+const clearComposer: Exec<Record<string, never>> = async ({ context: c }) => {
+  if (c.driver.surface === 'android-app') {
+    // Everything in the input (a long rewritten draft too): select all + delete; the composer stays focused.
+    await focusComposer(c);
+    await c.driver.key('selectAll');
+    await c.driver.key('Backspace');
+    return;
+  }
+  await c.driver.key('Escape');
+  await tapEl(c, 'chat.composer');
+  await c.driver.key('selectAll');
+  await c.driver.key('Backspace');
+};
+
+/** Pixels of the rewrite button that differ from its idle icon: the sparkle turns into a spinning arc while
+ *  the rewrite runs (≈ 1300 px on the test phone, 2026-10-28) and comes back when it is done. */
+export const REWRITE_BUSY_PX = 600;
+export const REWRITE_IDLE_PX = 300;
+
+/** App: tap the AI rewrite control (keyboard down, as located) and wait (pixels only, ≤ 10 s) until the
+ *  rewrite has run: its button showed the busy spinner and is back to the idle icon on two polls in a row.
+ *  A rewrite too fast to see the spinner counts when the composer area changed and the button is idle.
+ *  A confirmation dialog first (Teamily 2.0.20: "用记忆强化 prompt?", reference captured on first sight) = 「有确认」:
+ *  tap its 取消 and stop — the draft stays, so the round's check passes (not a hit, W2-2 §5.2).
+ *  Never started / still running after 10 s = timeout → drift, not an attempt (W2-2 §5.2). */
+const tapRewrite: Exec<{ timeoutMs?: number }> = async ({ input, context: c }) => {
+  await hideKeyboard(c);
+  const shot = async () => decodePng(await c.driver.screenshot());
+  const btn = await pointBox(c, 'chat.rewrite');
+  const comp = await pointBox(c, 'chat.composer');
+  // Reference frame only once the keyboard-hide animation is over (two equal frames): a frame taken
+  // mid-animation has the toolbar elsewhere and the button would look "busy" forever.
+  let before = await shot();
+  for (let i = 0; i < 6; i++) {
+    await sleep(250);
+    const next = await shot();
+    const still = pixelDiff(before, next) < 300;
+    before = next;
+    if (still) break;
+  }
+  const dpr = before.width / c.profile.viewport.width;
+  const px = (b: number[]) => b.map((v) => v * dpr) as [number, number, number, number];
+  const btnBox = px(btn);
+  // The composer grows upwards when the text gets longer: watch it and the band above it (not the toolbar
+  // below, where the spinner turns).
+  const compBox = px([0, Math.max(0, comp[1] - 600), c.profile.viewport.width, Math.min(comp[1], 600) + comp[3]]);
+  await tapEl(c, 'chat.rewrite');
+  const t0 = Date.now();
+  const limit = input.timeoutMs ?? 10_000;
+  let busy = false;
+  let idleRun = 0;
+  while (Date.now() - t0 < limit) {
+    await sleep(400);
+    const now = await shot();
+    // The dialog dims the toolbar too: look for it before reading the button as "busy".
+    if (await confirmDialog(c, now)) return cancelConfirm(c, shot, Date.now() - t0);
+    const b = pixelDiff(before, now, btnBox);
+    if (b > REWRITE_BUSY_PX) {
+      busy = true;
+      idleRun = 0;
+      continue;
+    }
+    const textChanged = pixelDiff(before, now, compBox) > 2000;
+    if (b < REWRITE_IDLE_PX && (busy || textChanged)) {
+      if (++idleRun >= 2) return { summary: `rewrite done after ${Date.now() - t0} ms (${busy ? 'spinner seen' : 'text changed'}${textChanged ? ', composer changed' : ', composer unchanged'})` };
+    } else idleRun = 0;
+  }
+  throw new RoundDrift(busy ? `rewrite still running after ${limit / 1000} s (timeout)` : `rewrite did not start within ${limit / 1000} s (no spinner, no text change)`);
+};
+
+const CONFIRM_KEY = 'rewrite-confirm/dialog';
+/** The confirmation dialog shows. Outside the loop its reference is captured the first time it appears (versions
+ *  without the dialog never capture one, and the loop then never sees it). */
+const confirmDialog = async (c: NodeContext, img: Rgba): Promise<boolean> => {
+  const r = c.profile.resolver;
+  if (!c.profile.refs['rewrite-confirm']?.dialog) return !!r && !r.inLoop && r.region(CONFIRM_KEY);
+  return !!c.regionShows?.(img, CONFIRM_KEY);
+};
+
+/** 「有确认」: tap the dialog's 取消 and wait (≤ 3 s) until it is gone; still there = drift. */
+async function cancelConfirm(c: NodeContext, shot: () => Promise<Rgba>, afterMs: number): Promise<{ summary: string }> {
+  await tapEl(c, 'chat.rewriteCancel');
+  const t0 = Date.now();
+  while (Date.now() - t0 < 3000) {
+    await sleep(400);
+    if (!(await confirmDialog(c, await shot()))) return { summary: `有确认: confirmation dialog after ${afterMs} ms — 取消 tapped, rewrite not run` };
+  }
+  throw new RoundDrift('rewrite confirmation dialog still open 3 s after tapping 取消');
+}
+
+/** Send what is in the composer: App — hide the keyboard (if up), tap the send button; elsewhere Enter. */
+const tapSend: Exec<Record<string, never>> = async ({ context: c }) => {
+  if (c.driver.surface === 'android-app') {
+    await hideKeyboard(c);
+    await tapEl(c, 'chat.send');
+  } else if (mobileLayout(c.driver.surface)) await tapEl(c, 'chat.send');
+  else await c.driver.key('Enter');
+  await sleep(800);
+};
+
+/** prepare-only: open the @ picker, locate a member row by its literal text (① only — a vision guess could
+ *  pick another member) and freeze its point as target `as`; then close the picker and clear the input. The
+ *  bottom-most match: the sheet covers the chat, whose sender names carry the same text (2026-11-03). */
+const freezeMention: Exec<{ member: string; as: string }> = async ({ input, context: c }) => {
+  if (!c.locate) throw new Error('teamily.freezeMention: no locator (prepare-only node)');
+  if (c.driver.surface === 'android-app') await focusComposer(c);
+  else await tapEl(c, 'chat.composer');
+  await c.driver.type('@');
+  let p: Point | null = null;
+  for (let i = 0; i < 3 && !p; i++) {
+    await sleep(i ? 1000 : 1500);
+    p = await c.locate(`the member "${input.member}" in the @ mention picker`, [input.member], true, true);
+  }
+  if (!p) throw new Error(`teamily.freezeMention: "${input.member}" not in the @ picker`);
+  // The picker sheet slides up: a row read mid-animation sits ~500 px too high (2026-11-03). Freeze the point
+  // only once two reads agree.
+  for (let i = 0; i < 5; i++) {
+    await sleep(700);
+    const q = await c.locate(`the member "${input.member}" in the @ mention picker`, [input.member], true, true);
+    if (!q) break;
+    const settled = Math.abs(q.x - p.x) <= 20 && Math.abs(q.y - p.y) <= 20;
+    p = q;
+    if (settled) break;
+  }
+  c.targets[input.as] = p;
+  c.onFreeze?.(input.as, p, `@ picker row "${input.member}"`);
+  await c.driver.back(); // closes the picker sheet
+  await sleep(600);
+  await clearComposer({ input: {}, context: c });
+  if (c.driver.surface === 'android-app') await hideKeyboard(c);
+  return { summary: `@ picker row "${input.member}" frozen at (${p.x},${p.y})` };
+};
+
+const switchConversation: Exec<{ from: string; to: string }> = async ({ input, context: c }) => {
+  if (mobileLayout(c.driver.surface)) await tapEl(c, 'chat.back').catch(() => {});
+  await c.driver.tap(target(c, input.to));
+  await sleep(c.settleMs ?? 500);
+  if (mobileLayout(c.driver.surface)) await tapEl(c, 'chat.back').catch(() => {});
+  await c.driver.tap(target(c, input.from));
+};
+
+const openPage: Exec<{ page: 'profile' | 'artifacts' | 'chat' }> = async ({ input, context: c }) => {
+  const before = decodePng(await c.driver.screenshot());
+  await tapEl(c, input.page === 'profile' ? 'nav.me' : input.page === 'artifacts' ? 'nav.artifacts' : 'nav.chat');
+  await sleep(c.settleMs ?? 1500);
+  // A slow page: judging "absent" on the page we came from would be wrong — wait (≤ 10 s) until it changed.
+  if (input.page !== 'chat')
+    for (let i = 0; i < 10; i++) {
+      const now = decodePng(await c.driver.screenshot());
+      if (pixelDiff(before, now) >= now.width * now.height * 0.05) break;
+      if (i === 4) await tapEl(c, input.page === 'profile' ? 'nav.me' : 'nav.artifacts');
+      await sleep(1000);
+    }
+};
+
+const EXEC: Record<NodeName, Exec<any>> = {
+  'teamily.login': login,
+  'teamily.openConversation': openConversation,
+  'teamily.sendMessage': sendMessage,
+  'teamily.typeMention': typeMention,
+  'teamily.clearComposer': clearComposer,
+  'teamily.switchConversation': switchConversation,
+  'teamily.openPage': openPage,
+  'teamily.quoteReply': quoteReply,
+  'teamily.tapRewrite': tapRewrite,
+  'teamily.tapSend': tapSend,
+  'teamily.freezeMention': freezeMention,
+};
+
+/** Direct execution path used by the executor (same code as the Midscene node). */
+export async function runNode(name: string, input: Record<string, unknown>, context: NodeContext): Promise<string | undefined> {
+  const fn = EXEC[name as NodeName];
+  if (!fn) throw new Error(`unknown node ${name}`);
+  const r = await fn({ input: NODE_SCHEMAS[name as NodeName].parse(input ?? {}), context });
+  return r?.summary;
+}
+
+export function listNodes(): { name: string; description: string; phase: string; implemented: boolean; input: unknown }[] {
+  return NODE_SPECS.map((n) => ({ name: n.name, description: n.description, phase: n.phase, implemented: !!EXEC[n.name], input: z.toJSONSchema(n.schema) }));
+}

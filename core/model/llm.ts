@@ -1,0 +1,126 @@
+// JSON chat against the OpenAI-compatible endpoint Midscene is configured with (same as mission/planner).
+// chatJson is text-only; visionJson gets recorded evidence frames (incident review, never the hot loop).
+// Neither ever receives credentials. Every call is counted (report: "model calls").
+
+/** Every model call, also by purpose (plan / prep / checkpoint / evidence / warmup / calibrate / sync / locate). */
+export const modelCalls = { text: 0, vision: 0, byPurpose: {} as Record<string, number> };
+
+/** Count one call; `purpose` defaults to the current phase (setModelPurpose). */
+/** Listeners of every model call (trajectory). */
+export const modelCallListeners = new Set<(e: { kind: 'text' | 'vision'; purpose: string }) => void>();
+
+export function countCall(kind: 'text' | 'vision', purpose = currentPurpose): void {
+  modelCalls[kind]++;
+  for (const l of modelCallListeners) l({ kind, purpose });
+  const k = `${kind}:${purpose}`;
+  modelCalls.byPurpose[k] = (modelCalls.byPurpose[k] ?? 0) + 1;
+}
+let currentPurpose = 'other';
+export function setModelPurpose(p: string): void {
+  currentPurpose = p;
+}
+
+/** Pure: first {...} JSON object in a model answer (code fences tolerated). */
+export function extractJson(text: string): unknown {
+  const s = text.replace(/```(?:json)?/g, '');
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start < 0 || end <= start) return undefined;
+  try {
+    return JSON.parse(s.slice(start, end + 1));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Pure: majority of boolean votes; null when no vote was cast or the vote is tied. */
+export function majority(answers: (boolean | null)[]): { value: boolean | null; yes: number; no: number } {
+  const yes = answers.filter((x) => x === true).length;
+  const no = answers.filter((x) => x === false).length;
+  return { value: !yes && !no ? null : yes === no ? null : yes > no, yes, no };
+}
+
+function cfg() {
+  const base = process.env.MIDSCENE_PLANNING_MODEL_BASE_URL ?? process.env.MIDSCENE_MODEL_BASE_URL;
+  const key = process.env.MIDSCENE_PLANNING_MODEL_API_KEY ?? process.env.MIDSCENE_MODEL_API_KEY;
+  const model = process.env.ISSUE_PLANNER_MODEL ?? process.env.MISSION_PLANNER_MODEL ?? process.env.MIDSCENE_MODEL_NAME;
+  return base && key && model ? { base, key, model } : undefined;
+}
+
+export function modelConfigured(): boolean {
+  return !!cfg() && process.env.ISSUE_NO_MODEL !== '1';
+}
+
+export async function chatJson(system: string, user: string, timeoutMs = 90_000): Promise<unknown> {
+  const c = cfg();
+  if (!c || process.env.ISSUE_NO_MODEL === '1') return undefined;
+  countCall('text');
+  try {
+    const res = await fetch(`${c.base.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${c.key}` },
+      body: JSON.stringify({ model: c.model, temperature: 0.1, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return extractJson(body.choices?.[0]?.message?.content ?? '');
+  } catch (err) {
+    console.warn(`[issue] model call failed (${(err as Error).message}); falling back to rules`);
+    return undefined;
+  }
+}
+
+function visionCfg() {
+  const base = process.env.MIDSCENE_MODEL_BASE_URL;
+  const key = process.env.MIDSCENE_MODEL_API_KEY;
+  const model = process.env.EVIDENCE_VISION_MODEL ?? process.env.MIDSCENE_MODEL_NAME;
+  return base && key && model ? { base, key, model } : undefined;
+}
+
+export function visionConfigured(): boolean {
+  return !!visionCfg() && process.env.ISSUE_NO_VISION !== '1';
+}
+
+export type VisionPart = string | { label: string; png: Buffer; mime?: string };
+
+/** Images + text → JSON, against the vision model Midscene uses (OpenAI-compatible image_url parts).
+ *  Used offline on recorded evidence only (never in the action loop). Counted as a vision call. */
+export async function visionJson(system: string, parts: VisionPart[], timeoutMs = 120_000): Promise<unknown> {
+  const c = visionCfg();
+  if (!c || process.env.ISSUE_NO_VISION === '1') return undefined;
+  countCall('vision');
+  const content = parts.flatMap((p) =>
+    typeof p === 'string' ? [{ type: 'text', text: p }] : [{ type: 'text', text: p.label }, { type: 'image_url', image_url: { url: `data:${p.mime ?? 'image/png'};base64,${p.png.toString('base64')}` } }],
+  );
+  // A busy or failing service (429 / 5xx / network) is tried again after a pause; a bad answer is not.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(`${c.base.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${c.key}` },
+        body: JSON.stringify({ model: c.model, temperature: 0.1, messages: [{ role: 'system', content: system }, { role: 'user', content }] }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`), { status: res.status });
+      const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      visionOutage = undefined;
+      return extractJson(body.choices?.[0]?.message?.content ?? '');
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      const transient = status === undefined ? (err as Error).name !== 'TimeoutError' : status === 429 || status >= 500;
+      console.warn(`[vision] call failed (${(err as Error).message})${transient && attempt < VISION_RETRY_MS.length ? ` — retrying in ${VISION_RETRY_MS[attempt] / 1000} s` : ''}`);
+      if (!transient || attempt >= VISION_RETRY_MS.length) {
+        if (transient) visionOutage = (err as Error).message.slice(0, 200);
+        return undefined;
+      }
+      await new Promise((r) => setTimeout(r, VISION_RETRY_MS[attempt]));
+    }
+  }
+}
+
+/** Pauses before retrying a busy / failing vision service. */
+export const VISION_RETRY_MS = [5_000, 20_000, 60_000];
+/** Set when the last vision call gave up on a busy / failing service (cleared by the next answer): callers tell
+ *  "the service is down" (a tool failure) from "the model gave no usable answer". */
+export let visionOutage: string | undefined;

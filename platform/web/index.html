@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>autotest · 黑盒测试台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f6f4ef'/%3E%3Crect x='10' y='7' width='12' height='18' rx='3' fill='none' stroke='%236f9c6a' stroke-width='2.5'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="paper" aria-hidden="true"></div>
+<div id="banner"></div>
+<header class="topbar">
+  <a class="brand" href="#/">
+    <span class="brand__mark" aria-hidden="true"></span>
+    <span class="brand__text"><b>autotest</b><small>真机黑盒测试台 · Teamily</small></span>
+  </a>
+  <nav class="nav" id="nav">
+    <a href="#/" data-route="home">总览</a>
+    <a href="#/new" data-route="new">新建任务</a>
+    <a href="#/approvals" data-route="approvals">审批</a>
+  </nav>
+  <span class="chip" id="who" title="在 Web 上同意 / 驳回时记录的审核人">审核人 …</span>
+</header>
+<main id="view" class="view"><p class="muted">加载中…</p></main>
+<footer class="foot">每页回答五问：要做什么 · 正在做什么 · 结果 · 可信吗 · 下一步。CLI、MCP 与本页读同一份视图模型（<span class="mono">/api/v1</span>）。</footer>
+<script src="/app.js"></script>
+</body>
+</html>

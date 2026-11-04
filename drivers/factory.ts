@@ -1,0 +1,44 @@
+// One place that turns (surface, device / account) into a black-box Driver.
+import type { Surface } from '../platform/accounts/types';
+import { AndroidDriver } from './android';
+import type { Driver } from './types';
+import { WebDriver } from './web';
+
+export interface DriverSpec {
+  surface: Surface;
+  /** Android surfaces: package of the app under test (default: Teamily / the phone browser). */
+  packageName?: string;
+  /** Web app URL of the environment (web surfaces). */
+  url: string;
+  /** Android surfaces: the phone. */
+  udid?: string;
+  /** Playwright surfaces: saved login. */
+  storageState?: string;
+  headless?: boolean;
+  onLog?: (at: number, line: string) => void;
+  onConsole?: (e: { at: number; type: string; text: string }) => void;
+}
+
+export const APP_ERROR_RE = /Exception|Error:|TypeError|ReferenceError|Invariant Violation/;
+export const CONSOLE_IGNORE = /favicon|Download the React DevTools|sentry|analytics/i;
+/** The Teamily Android app package (the one place it is spelled). */
+export const TEAMILY_PACKAGE = process.env.TEAMILY_PACKAGE ?? 'ai.teamily.mobile';
+export const BROWSER_PACKAGE = process.env.ANDROID_BROWSER_PACKAGE ?? 'com.android.browser';
+
+export function createDriver(s: DriverSpec): Driver {
+  switch (s.surface) {
+    case 'android-app':
+    case 'android-web':
+      if (!s.udid) throw new Error(`${s.surface} needs a device`);
+      return new AndroidDriver({
+        udid: s.udid,
+        surface: s.surface,
+        packageName: s.packageName ?? (s.surface === 'android-web' ? BROWSER_PACKAGE : TEAMILY_PACKAGE),
+        url: s.surface === 'android-web' ? s.url : undefined,
+        onLog: s.onLog,
+        appErrorRe: s.surface === 'android-app' ? APP_ERROR_RE : undefined,
+      });
+    default:
+      return new WebDriver({ surface: s.surface, url: s.url, storageState: s.storageState, headless: s.headless, onConsole: s.onConsole, consoleIgnore: CONSOLE_IGNORE });
+  }
+}

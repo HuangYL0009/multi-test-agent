@@ -1,0 +1,146 @@
+{
+  "id": "1594-desktop-web-v1",
+  "issueRef": "1594",
+  "title": "@ 成员选择器弹出（切换会话后循环）",
+  "category": "bug-intermittent",
+  "surface": "desktop-web",
+  "issueSurfaces": [
+    "web"
+  ],
+  "env": "prod",
+  "launch": "once",
+  "targets": [
+    {
+      "id": "group",
+      "kind": "group-conversation",
+      "guidance": "成员 ≥3 的群聊（会话列表头像为多人拼图，或名称含多个成员名/逗号）；@ 类问题用它"
+    },
+    {
+      "id": "other",
+      "kind": "other-conversation",
+      "guidance": "与目标群不同的任意会话（用于切换会话再切回）"
+    }
+  ],
+  "setup": [
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.openConversation",
+        "input": {
+          "target": "group"
+        }
+      },
+      "delayAfterMs": 800
+    }
+  ],
+  "prepare": [],
+  "actions": [
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.clearComposer",
+        "input": {}
+      },
+      "delayAfterMs": 200
+    },
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.openConversation",
+        "input": {
+          "target": "other"
+        }
+      },
+      "delayAfterMs": 500
+    },
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.openConversation",
+        "input": {
+          "target": "group"
+        }
+      },
+      "delayAfterMs": 700
+    },
+    {
+      "type": "node",
+      "node": {
+        "name": "teamily.typeMention",
+        "input": {}
+      },
+      "delayAfterMs": 700
+    }
+  ],
+  "checks": [
+    {
+      "kind": "visual-region",
+      "page": "mention-picker",
+      "region": "picker",
+      "expect": "输入 @ 后成员/智能体选择器弹出",
+      "want": "present",
+      "onlyOnAnomaly": true,
+      "requires": {
+        "composerHas": "@"
+      }
+    },
+    {
+      "kind": "page-error",
+      "expect": "无崩溃 / 页面错误",
+      "want": "absent"
+    }
+  ],
+  "afterCheck": [],
+  "limits": {
+    "maxSteps": 1000,
+    "maxMinutes": 15,
+    "maxIntervalMs": 1000
+  },
+  "verdictRule": {
+    "anyHit": true
+  },
+  "contract": {
+    "issueRef": "1594",
+    "sub": "main",
+    "preconditions": [
+      {
+        "id": "logged-in",
+        "text": "已登录",
+        "establish": "executor"
+      },
+      {
+        "id": "group-conversation",
+        "text": "存在成员 ≥3 的群聊",
+        "establish": "existing-data"
+      },
+      {
+        "id": "other-conversation",
+        "text": "存在另一个会话（切换用）",
+        "establish": "existing-data"
+      }
+    ],
+    "trigger": {
+      "semantics": "repeat-switch-and-mention",
+      "text": "On the Teamily Web client, typing \"@\" in the message input of a chat conversation intermittently fails to open the member/agent selection picker, so the user cannot mention anyone. Switching to another conversation and back restores the picker. Reproduced during a live meeting by the reporter. Suspe",
+      "pattern": "mention-picker",
+      "params": {}
+    },
+    "observable": {
+      "observation": "region",
+      "text": "Typing \"@\" in the message input box reliably opens the member/agent selection picker, allowing the user to mention any member or agent, regardless of how the conversation was entered.",
+      "phenomenon": "The @-mention selection picker sometimes does not appear after typing \"@\" — no member/agent list is shown and the user cannot mention anyone. The feature only recovers after switching to another conversation and back. Confirmed on the Web client, also reproduced during a meeting."
+    },
+    "provenance": {
+      "by": "rules",
+      "skillVersion": "2026.10.26-1"
+    }
+  },
+  "provenance": {
+    "generatedBy": "rules",
+    "skillVersion": "2026.10.26-1",
+    "pattern": "mention-picker",
+    "confirmedAt": "2026-10-27T04:55:24.508Z",
+    "draftHash": "3cedbed9efd89816"
+  },
+  "coverage": "covered"
+}

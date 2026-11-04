@@ -1,0 +1,32 @@
+node_modules/
+.env
+midscene_run/
+# legacy Allure output (no longer produced since refactor P1)
+allure-results/
+allure-report/
+
+# read-only third-party reference projects (nested git repos), not part of this codebase
+ref/
+
+# local adb install (see env-plan.md)
+tools/
+monkey_run/
+platform/state/
+.playwright-mcp/
+.imui/
+
+# account secrets (account pool, local backend)
+*.local.yaml
+platform/secrets/
+.m5tmp/
+# Issues drafted from exploration findings and their drafts / plans (runtime artifacts)
+issues/explore/
+platform/plans/drafts/explore-*
+platform/plans/explore-*
+
+# Process documents stay local: the repository holds runnable code only (2026-11-03).
+# Milestone docs, acceptance records, rules audit, changelog, summaries, local Issues.
+/docs/
+/issues/
+/CHANGELOG.md
+/PROJECT-SUMMARY.md
