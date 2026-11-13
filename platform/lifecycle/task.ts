@@ -59,10 +59,14 @@ export interface TaskRecord {
   endedAt?: Position;
   /** Runs cut short: valid attempts / hits so far, marked incomplete (no verdict). */
   partial?: { valid: number; hits: number; note: string };
+  /** W3-1 §8.2: what the revision step did after this run (next plan version / why none), and the task it queued. */
+  revision?: { note: string; planId?: string; next?: string };
   outcome?: { code: Code; summary: string };
   /** Report / run dir of the executor (for links). */
   runDir?: string;
   report?: string;
+  /** Opened from a saved run (saved/<name>, platform/session.ts): read-only history, not run in this session. */
+  restoredFrom?: string;
 }
 
 export const TASK_FLOW: Record<TaskState, TaskState[]> = {

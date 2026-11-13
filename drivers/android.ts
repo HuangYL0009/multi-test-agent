@@ -5,6 +5,8 @@
 //   process death   : am_proc_died / "Process <pkg> (pid N) has died"
 //   left the app    : wm_set_resumed_activity / am_focused_* naming another package
 //   app E/ lines    : of the app's pid, matched against the SKILL table → suspect only
+// Must stay before @midscene/android: it sets APPIUM_TMP_DIR before @appium/support is loaded.
+import '../core/appium-tmp';
 import { AndroidDevice } from '@midscene/android';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -237,6 +239,14 @@ export class AndroidDriver implements Driver {
 
   async longPress(p: Point, ms = 800): Promise<void> {
     await this.sh(`input swipe ${Math.round(p.x)} ${Math.round(p.y)} ${Math.round(p.x)} ${Math.round(p.y)} ${ms}`);
+  }
+
+  async typeExact(text: string): Promise<void> {
+    if (!this.device) {
+      const adbPath = resolveAdbPath();
+      this.device = new AndroidDevice(this.o.udid, adbPath === 'adb' ? {} : { androidAdbPath: adbPath });
+    }
+    await this.device.execYadb(text);
   }
 
   async type(text: string): Promise<void> {
